@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Звонки по юзернейму — WebRTC (GitHub Pages)</title>
+  <style>
+    :root{--bg:#f7fafc;--card:#fff;--muted:#6b7280;--accent:#4f46e5;}
+    body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;padding:20px;background:var(--bg);color:#111;}
+    .container{max-width:1000px;margin:0 auto;display:grid;grid-template-columns:1fr;gap:18px;}
+    header h1{font-size:20px;margin:0 0 6px;}
+    header p{margin:0;color:var(--muted);font-size:13px;}
+    .card{background:var(--card);padding:16px;border-radius:12px;box-shadow:0 1px 3px rgba(15,23,42,0.06);}
+    label{display:block;font-size:13px;color:var(--muted);margin-top:8px;}
+    input[type="text"], input[type="url"]{width:100%;padding:8px;border-radius:8px;border:1px solid #e6e9ee;margin-top:6px;font-size:14px;}
+    .row{display:flex;gap:8px;margin-top:10px;}
+    button{padding:8px 12px;border-radius:8px;border:0;background:var(--accent);color:#fff;cursor:pointer;font-weight:600;}
+    button.secondary{background:#e6e9ee;color:#111;font-weight:600;}
+    .videos{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;}
+    video{width:100%;height:240px;background:#000;border-radius:8px;object-fit:cover;}
+    .log{max-height:160px;overflow:auto;background:#f1f5f9;border-radius:8px;padding:8px;font-size:12px;color:#111;margin-top:8px;}
+    .muted{color:var(--muted);font-size:13px;}
+    footer{font-size:13px;color:var(--muted);margin-top:8px;}
+    @media (max-width:720px){ .videos{grid-template-columns:1fr;} video{height:200px;} .row{flex-direction:column;} }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Звонки по юзернейму (WebRTC)</h1>
+      <p>Статичный HTML для GitHub Pages. Нужен signaling-сервер (WebSocket). Замените URL ниже.</p>
+    </header>
+
+    <section class="card" id="controls">
+      <div>
+        <label>Signaling WebSocket URL</label>
+        <input id="wsUrl" type="url" placeholder="wss://your-signaling-server.example" value="wss://your-signaling-server.example">
+        <label>Ваш username</label>
+        <input id="username" type="text" placeholder="alice">
+        <div style="margin-top:8px" class="row">
+          <button id="connectBtn">Connect & Register</button>
+          <button id="disconnectBtn" class="secondary">Disconnect</button>
+        </div>
+
+        <label style="margin-top:12px">Target username (кому звоните)</label>
+        <input id="target" type="text" placeholder="bob">
+        <div class="row">
+          <button id="callBtn">Call</button>
+          <button id="hangupBtn" class="secondary">Hang up</button>
+        </div>
+
+        <div style="margin-top:12px" class="muted">
+          <div>Подсказки:</div>
+          <ul style="margin:6px 0 0 18px;padding:0;">
+            <li>Используйте WSS (wss://) если сайт доступен по HTTPS (GitHub Pages — HTTPS).</li>
+            <li>Для надёжной работы в разных сетях добавьте TURN-сервер (coturn).</li>
+            <li>Этот пример — демо; для продакшена нужна авторизация и безопасность сообщений.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin:0 0 8px 0">Видео</h3>
+      <div class="videos">
+        <div>
+          <div class="muted" style="margin-bottom:6px">Вы</div>
+          <video id="localVideo" autoplay muted playsinline></video>
+        </div>
+        <div>
+          <div class="muted" style="margin-bottom:6px">Собеседник</div>
+          <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div class="muted">Лог</div>
+        <div id="log" class="log"></div>
+      </div>
+    </section>
+
+    <footer class="muted card">
+      <div>Под капотом: WebSocket signaling + WebRTC PeerConnection (STUN по умолчанию).</div>
+      <div style="margin-top:6px">Пример signaling-сервера — внутри HTML ниже (комментарий). Для GitHub Pages используйте WSS-сервер отдельно.</div>
+    </footer>
+  </div>
+
+<script>
+/*
+  Простая логика signaling по username:
+  Обмениваем JSON-сообщения:
+    { type: 'register', username }
+    { type: 'offer', from, to, sdp }
+    { type: 'answer', from, to, sdp }
+    { type: 'ice-candidate', from, to, candidate }
+
+  ВАЖНО: signaling-сервер должен пересылать сообщения между пользователями (по полю "to").
+  Ниже — клиентская логика. Для продакшена: добавьте проверку, авторизацию, TLS и TURN.
+*/
+
+(() => {
+  const wsUrlInput = document.getElementById('wsUrl');
+  const usernameInput = document.getElementById('username');
+  const targetInput = document.getElementById('target');
+  const connectBtn = document.getElementById('connectBtn');
+  const disconnectBtn = document.getElementById('disconnectBtn');
+  const callBtn = document.getElementById('callBtn');
+  const hangupBtn = document.getElementById('hangupBtn');
+
+  const localVideo = document.getElementById('localVideo');
+  const remoteVideo = document.getElementById('remoteVideo');
+  const logEl = document.getElementById('log');
+
+  let ws = null;
+  let pc = null;
+  let localStream = null;
+
+  function log(msg) {
+    const line = document.createElement('div');
+    const time = new Date().toLocaleTimeString();
+    line.textContent = time + ' — ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log(msg);
+  }
+
+  function connectAndRegister() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      log('WebSocket уже подключён');
+      register();
+      return;
+    }
+    const url = wsUrlInput.value.trim();
+    if (!url) { log('Укажите URL signaling-сервера'); return; }
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      log('Невозможно открыть WebSocket: ' + e.message);
+      return;
+    }
+    ws.onopen = () => {
+      log('WebSocket connected');
+      register();
+    };
+    ws.onmessage = async (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { log('Bad WS json'); return; }
+      log('<< ' + JSON.stringify(msg));
+      if (msg.type === 'offer') {
+        await onOffer(msg);
+      } else if (msg.type === 'answer') {
+        await onAnswer(msg);
+      } else if (msg.type === 'ice-candidate') {
+        await onRemoteIce(msg);
+      } else if (msg.type === 'registered') {
+        log('Зарегистрированы как ' + (msg.username || usernameInput.value));
+      } else if (msg.type === 'error') {
+        log('Server error: ' + (msg.reason || JSON.stringify(msg)));
+      }
+    };
+    ws.onclose = () => { log('WebSocket closed'); ws = null; };
+    ws.onerror = (e) => { log('WebSocket error'); };
+  }
+
+  function register() {
+    const username = usernameInput.value.trim();
+    if (!username) { log('Введите username'); return; }
+    sendWs({ type: 'register', username });
+  }
+
+  function disconnectWs() {
+    if (ws) ws.close();
+    ws = null;
+    log('Disconnected');
+  }
+
+  function sendWs(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      log('WebSocket не подключён');
+      return;
+    }
+    ws.send(JSON.stringify(obj));
+    log('>> ' + JSON.stringify(obj));
+  }
+
+  async function startLocalStream() {
+    if (localStream) return localStream;
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+      return localStream;
+    } catch (e) {
+      log('getUserMedia failed: ' + e.message);
+      throw e;
+    }
+  }
+
+  function createPeerConnection() {
+    if (pc) return pc;
+    pc = new RTCPeerConnection({
+      iceServers: [
+        // STUN by default; add TURN server config here for production:
+        { urls: 'stun:stun.l.google.com:19302' }
+        /* Example TURN:
+        {
+          urls: 'turn:turn.example:3478',
+          username: 'turnuser',
+          credential: 'turnpass'
+        }
+        */
+      ]
+    });
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        const msg = { type: 'ice-candidate', from: usernameInput.value.trim(), to: targetInput.value.trim(), candidate: e.candidate };
+        sendWs(msg);
+      }
+    };
+
+    pc.ontrack = (e) => {
+      log('Remote track received.');
+      remoteVideo.srcObject = e.streams[0];
+    };
+
+    pc.onconnectionstatechange = () => {
+      log('PC state: ' + pc.connectionState);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
+        // можно очистить ресурсы
+      }
+    };
+
+    return pc;
+  }
+
+  async function call() {
+    const from = usernameInput.value.trim();
+    const to = targetInput.value.trim();
+    if (!from) { log('Введите свой username'); return; }
+    if (!to) { log('Введите target username'); return; }
+    if (!ws || ws.readyState !== WebSocket.OPEN) { log('WebSocket не подключён — подключаюсь...'); connectAndRegister(); }
+
+    await startLocalStream();
+    const pcLocal = createPeerConnection();
+    localStream.getTracks().forEach(t => pcLocal.addTrack(t, localStream));
+
+    try {
+      const offer = await pcLocal.createOffer();
+      await pcLocal.setLocalDescription(offer);
+      sendWs({ type: 'offer', from, to, sdp: pcLocal.localDescription });
+    } catch (e) {
+      log('Ошибка при создании offer: ' + e.message);
+    }
+  }
+
+  async function onOffer(msg) {
+    const from = msg.from;
+    log('Получен offer от ' + from);
+    targetInput.value = from; // заполним target как звонящий
+    await startLocalStream();
+    const pcLocal = createPeerConnection();
+    localStream.getTracks().forEach(t => pcLocal.addTrack(t, localStream));
+    try {
+      await pcLocal.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      const answer = await pcLocal.createAnswer();
+      await pcLocal.setLocalDescription(answer);
+      sendWs({ type: 'answer', from: usernameInput.value.trim(), to: from, sdp: pcLocal.localDescription });
+    } catch (e) {
+      log('Ошибка при обработке offer: ' + e.message);
+    }
+  }
+
+  async function onAnswer(msg) {
+    log('Получен answer');
+    try {
+      await createPeerConnection().setRemoteDescription(new RTCSessionDescription(msg.sdp));
+    } catch (e) {
+      log('Ошибка при установке remote description (answer): ' + e.message);
+    }
+  }
+
+  async function onRemoteIce(msg) {
+    try {
+      await createPeerConnection().addIceCandidate(new RTCIceCandidate(msg.candidate));
+      log('Добавлен удалённый ICE');
+    } catch (e) {
+      log('Ошибка при добавлении ICE: ' + e.message);
+    }
+  }
+
+  function hangup() {
+    if (pc) {
+      pc.close();
+      pc = null;
+    }
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+      localVideo.srcObject = null;
+    }
+    remoteVideo.srcObject = null;
+    log('Вызов завершён');
+  }
+
+  // кнопки
+  connectBtn.addEventListener('click', () => connectAndRegister());
+  disconnectBtn.addEventListener('click', () => disconnectWs());
+  callBtn.addEventListener('click', () => call());
+  hangupBtn.addEventListener('click', () => hangup());
+
+  // автоподсказка: попытаться зарегистрироваться при открытии ws (если username заполнен)
+})();
+</script>
+
+<!--
+Простой signaling-сервер (Node.js + ws) — только для разработки:
+
+const WebSocket = require('ws');
+const server = new WebSocket.Server({ port: 8080 });
+
+// map username -> ws
+const clients = new Map();
+
+server.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    let msg;
+    try { msg = JSON.parse(data); } catch (e) { ws.send(JSON.stringify({type:'error', reason:'bad_json'})); return; }
+
+    if (msg.type === 'register' && msg.username) {
+      clients.set(msg.username, ws);
+      ws.username = msg.username;
+      ws.send(JSON.stringify({type: 'registered', username: msg.username}));
+      return;
+    }
+
+    if (msg.to) {
+      const dest = clients.get(msg.to);
+      if (dest && dest.readyState === WebSocket.OPEN) {
+        dest.send(JSON.stringify(msg));
+      } else {
+        ws.send(JSON.stringify({type:'error', reason:'user_offline', to: msg.to}));
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    if (ws.username) clients.delete(ws.username);
+  });
+});
+
+console.log('Signaling server running on ws://localhost:8080');
+
+ПРИМЕЧАНИЯ:
+- Для использования с GitHub Pages (HTTPS) signaling должен поддерживать WSS (TLS).
+- В продакшене используйте TURN-сервер (coturn) в конфиге RTCPeerConnection для NAT traversal.
+- Добавьте авторизацию/верификацию сообщений, rate limiting и защиту от подмены username.
+-->
+</body>
+</html>
